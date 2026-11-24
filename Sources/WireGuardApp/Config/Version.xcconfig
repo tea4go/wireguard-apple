@@ -1,2 +1,4 @@
 VERSION_NAME = 1.0.16
 VERSION_ID = 27
+VERSION_NAME[sdk=iphone*] = 1.0.0
+VERSION_ID[sdk=iphone*] = 1

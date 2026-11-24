@@ -2,6 +2,8 @@
 
 This project contains an application for iOS and for macOS, as well as many components shared between the two of them. You may toggle between the two platforms by selecting the target from within Xcode.
 
+The iOS target builds **WG Connect** (WG 连接), which shares its configuration backup and node sync formats with WG Connect for HarmonyOS.
+
 ## Building
 
 - Clone this repo:
@@ -31,6 +33,28 @@ $ open WireGuard.xcodeproj
 ```
 
 - Flip switches, press buttons, and make whirling noises until Xcode builds it.
+
+## Installing on an iPhone
+
+Connect and unlock the iPhone, trust the Mac, and enable **Developer Mode** under **Settings → Privacy & Security**. Install the iOS platform in Xcode and sign in under **Xcode → Settings → Accounts** with a team that supports Network Extensions.
+
+From the repository root, replace the example Team ID and Bundle ID with your own:
+
+```sh
+./scripts/macos/3_ios_device.sh --team ABCDE12345 --bundle-id com.example.wireguard
+```
+
+The script builds and installs a development-signed app. The team needs development profiles for the app and `com.example.wireguard.network-extension`. Both App IDs need **Network Extensions** and the shared App Group `group.com.example.wireguard`. The app also needs **Access WiFi Information**. If the team permits Xcode to create or update signing assets, add `--provision`. The iPhone must be registered with the team.
+
+If more than one iPhone is available, run `./scripts/macos/3_ios_device.sh --list-devices` and pass the chosen Identifier with `--device`.
+
+## Configuration sync on iOS
+
+Open **Settings** in WG Connect and choose **Gitee Backup**, **GitHub Gist Backup**, or **Gitee Node Sync**. Enter a token with gist permissions and reuse the gist ID from HarmonyOS to exchange configurations. Leave the ID empty when creating a new gist. The app stores credentials in the iOS Keychain.
+
+- Backup versions use HarmonyOS's version 1 snapshot format. Restoring a version adds missing tunnels and updates matching names after confirmation. iOS cannot restore HarmonyOS per-app VPN rules. HarmonyOS diagnostic settings are skipped during import.
+- Node sync compares a local tunnel with a Gitee node file. Review each difference and choose whether to send a local node, use the remote node, or use a remote identity as the local interface.
+- Backups can contain private keys. GitHub secret gists are accessible to anyone who has their URL. Deleting a backup file from the current gist does not remove it from the gist's revision history.
 
 ## WireGuardKit integration
 

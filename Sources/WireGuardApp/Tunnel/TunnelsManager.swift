@@ -130,7 +130,10 @@ class TunnelsManager {
         }
 
         let tunnelProviderManager = NETunnelProviderManager()
-        tunnelProviderManager.setTunnelConfiguration(tunnelConfiguration)
+        guard tunnelProviderManager.setTunnelConfiguration(tunnelConfiguration) else {
+            completionHandler(.failure(.systemErrorOnAddTunnel(systemError: NEVPNError(.configurationReadWriteFailed))))
+            return
+        }
         tunnelProviderManager.isEnabled = true
 
         onDemandOption.apply(on: tunnelProviderManager)
@@ -231,21 +234,26 @@ class TunnelsManager {
             tunnel.onDeactivated = nil
         }
 
-        let oldName = tunnelProviderManager.localizedDescription ?? ""
+        let oldDescription = tunnelProviderManager.localizedDescription
+        let oldName = oldDescription ?? ""
         let isNameChanged = tunnelName != oldName
-        if isNameChanged {
-            guard !tunnels.contains(where: { $0.name == tunnelName }) else {
-                completionHandler(TunnelsManagerError.tunnelAlreadyExistsWithThatName)
-                return
-            }
-            tunnel.name = tunnelName
+        if isNameChanged && tunnels.contains(where: { $0.name == tunnelName }) {
+            completionHandler(TunnelsManagerError.tunnelAlreadyExistsWithThatName)
+            return
         }
 
-        var isTunnelConfigurationChanged = false
-        if tunnelProviderManager.tunnelConfiguration != tunnelConfiguration {
-            tunnelProviderManager.setTunnelConfiguration(tunnelConfiguration)
-            isTunnelConfigurationChanged = true
+        let oldConfiguration = tunnelProviderManager.tunnelConfiguration
+        let oldProtocol = tunnelProviderManager.protocolConfiguration
+        let oldEnabled = tunnelProviderManager.isEnabled
+        let oldRules = tunnelProviderManager.onDemandRules
+        let oldOnDemandEnabled = tunnelProviderManager.isOnDemandEnabled
+        let isTunnelConfigurationChanged = oldConfiguration != tunnelConfiguration
+        if isTunnelConfigurationChanged && !tunnelProviderManager.setTunnelConfiguration(tunnelConfiguration) {
+            completionHandler(.systemErrorOnModifyTunnel(systemError: NEVPNError(.configurationReadWriteFailed)))
+            return
         }
+        let newProtocol = tunnelProviderManager.protocolConfiguration as? NETunnelProviderProtocol
+        if isNameChanged { tunnel.name = tunnelName }
         tunnelProviderManager.isEnabled = true
 
         let isActivatingOnDemand = !tunnelProviderManager.isOnDemandEnabled && shouldEnsureOnDemandEnabled
@@ -256,10 +264,20 @@ class TunnelsManager {
 
         tunnelProviderManager.saveToPreferences { [weak self] error in
             if let error = error {
-                // TODO: the passwordReference for the old one has already been removed at this point and we can't easily roll back!
+                if isTunnelConfigurationChanged {
+                    tunnelProviderManager.setTunnelConfiguration(oldConfiguration, using: oldProtocol, named: oldDescription)
+                    newProtocol?.destroyConfigurationReference()
+                }
+                tunnel.name = oldName
+                tunnelProviderManager.isEnabled = oldEnabled
+                tunnelProviderManager.onDemandRules = oldRules
+                tunnelProviderManager.isOnDemandEnabled = oldOnDemandEnabled
                 wg_log(.error, message: "Modify: Saving configuration failed: \(error)")
                 completionHandler(TunnelsManagerError.systemErrorOnModifyTunnel(systemError: error))
                 return
+            }
+            if isTunnelConfigurationChanged {
+                (oldProtocol as? NETunnelProviderProtocol)?.destroyConfigurationReference()
             }
             guard let self = self else { return }
             if isNameChanged {
@@ -435,6 +453,7 @@ class TunnelsManager {
             return
         }
 
+        tunnel.connectionError = nil
         if let alreadyWaitingTunnel = tunnels.first(where: { $0.status == .waiting }) {
             alreadyWaitingTunnel.status = .inactive
         }
@@ -446,8 +465,13 @@ class TunnelsManager {
             if tunnelInOperation.status != .deactivating {
                 if tunnelInOperation.isActivateOnDemandEnabled {
                     setOnDemandEnabled(false, on: tunnelInOperation) { [weak self] error in
-                        guard error == nil else {
-                            wg_log(.error, message: "Unable to activate tunnel '\(tunnel.name)' because on-demand could not be disabled on active tunnel '\(tunnel.name)'")
+                        if let error = error {
+                            wg_log(.error, message: "Unable to activate tunnel '\(tunnel.name)' because on-demand could not be disabled on active tunnel '\(tunnelInOperation.name)'")
+                            if tunnel.status == .waiting {
+                                self?.waiteeObservationToken = nil
+                                tunnel.connectionError = error.alertText.message
+                                tunnel.status = .inactive
+                            }
                             return
                         }
                         self?.startDeactivation(of: tunnelInOperation)
@@ -509,7 +533,7 @@ class TunnelsManager {
                 if session.status == .connected {
                     tunnel.isAttemptingActivation = false
                     self.activationDelegate?.tunnelActivationSucceeded(tunnel: tunnel)
-                } else if session.status == .disconnected {
+                } else if session.status == .disconnected || session.status == .invalid {
                     tunnel.isAttemptingActivation = false
                     if let (title, message) = lastErrorTextFromNetworkExtension(for: tunnel) {
                         self.activationDelegate?.tunnelActivationFailed(tunnel: tunnel, error: .activationFailedWithExtensionError(title: title, message: message, wasOnDemandEnabled: tunnelProvider.isOnDemandEnabled))
@@ -566,6 +590,7 @@ private func lastErrorTextFromNetworkExtension(for tunnel: TunnelContainer) -> (
 class TunnelContainer: NSObject {
     @objc dynamic var name: String
     @objc dynamic var status: TunnelStatus
+    @objc dynamic var connectionError: String?
 
     @objc dynamic var isActivateOnDemandEnabled: Bool
     @objc dynamic var hasOnDemandRules: Bool
@@ -652,8 +677,12 @@ class TunnelContainer: NSObject {
     }
 
     fileprivate func startActivation(recursionCount: UInt = 0, lastError: Error? = nil, activationDelegate: TunnelsManagerActivationDelegate?) {
+        if recursionCount == 0 {
+            connectionError = nil
+        }
         if recursionCount >= 8 {
             wg_log(.error, message: "startActivation: Failed after 8 attempts. Giving up with \(lastError!)")
+            status = .inactive
             activationDelegate?.tunnelActivationAttemptFailed(tunnel: self, error: .failedBecauseOfTooManyErrors(lastSystemError: lastError!))
             return
         }
@@ -671,6 +700,7 @@ class TunnelContainer: NSObject {
                 guard let self = self else { return }
                 if error != nil {
                     wg_log(.error, message: "Error saving tunnel after re-enabling: \(error!)")
+                    self.status = .inactive
                     activationDelegate?.tunnelActivationAttemptFailed(tunnel: self, error: .failedWhileSaving(systemError: error!))
                     return
                 }
@@ -738,9 +768,15 @@ extension NETunnelProviderManager {
         return config
     }
 
-    func setTunnelConfiguration(_ tunnelConfiguration: TunnelConfiguration) {
-        protocolConfiguration = NETunnelProviderProtocol(tunnelConfiguration: tunnelConfiguration, previouslyFrom: protocolConfiguration)
-        localizedDescription = tunnelConfiguration.name
+    fileprivate func setTunnelConfiguration(_ tunnelConfiguration: TunnelConfiguration) -> Bool {
+        guard let tunnelProtocol = NETunnelProviderProtocol(tunnelConfiguration: tunnelConfiguration) else { return false }
+        setTunnelConfiguration(tunnelConfiguration, using: tunnelProtocol, named: tunnelConfiguration.name)
+        return true
+    }
+
+    fileprivate func setTunnelConfiguration(_ tunnelConfiguration: TunnelConfiguration?, using tunnelProtocol: NEVPNProtocol?, named name: String?) {
+        protocolConfiguration = tunnelProtocol
+        localizedDescription = name
         objc_setAssociatedObject(self, &NETunnelProviderManager.cachedConfigKey, tunnelConfiguration, objc_AssociationPolicy.OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
 

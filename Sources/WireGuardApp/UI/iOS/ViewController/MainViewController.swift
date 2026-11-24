@@ -65,6 +65,11 @@ class MainViewController: UISplitViewController {
 
 extension MainViewController: TunnelsManagerActivationDelegate {
     func tunnelActivationAttemptFailed(tunnel: TunnelContainer, error: TunnelsManagerActivationAttemptError) {
+        if case .tunnelIsNotInactive = error {
+            // A redundant request does not change the current connection status.
+        } else {
+            tunnel.connectionError = error.alertText.message
+        }
         ErrorPresenter.showErrorAlert(error: error, from: self)
     }
 
@@ -73,11 +78,12 @@ extension MainViewController: TunnelsManagerActivationDelegate {
     }
 
     func tunnelActivationFailed(tunnel: TunnelContainer, error: TunnelsManagerActivationError) {
+        tunnel.connectionError = error.alertText.message
         ErrorPresenter.showErrorAlert(error: error, from: self)
     }
 
     func tunnelActivationSucceeded(tunnel: TunnelContainer) {
-        // Nothing to do
+        tunnel.connectionError = nil
     }
 }
 

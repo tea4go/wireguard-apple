@@ -2,6 +2,7 @@
 // Copyright © 2018-2023 WireGuard LLC. All Rights Reserved.
 
 import UIKit
+import SwiftUI
 import MobileCoreServices
 import UserNotifications
 
@@ -16,10 +17,9 @@ class TunnelsListTableViewController: UIViewController {
     }
 
     let tableView: UITableView = {
-        let tableView = UITableView(frame: CGRect.zero, style: .plain)
+        let tableView = UITableView(frame: CGRect.zero, style: .insetGrouped)
         tableView.estimatedRowHeight = 60
         tableView.rowHeight = UITableView.automaticDimension
-        tableView.separatorStyle = .none
         tableView.register(TunnelListCell.self)
         return tableView
     }()
@@ -47,7 +47,7 @@ class TunnelsListTableViewController: UIViewController {
 
     override func loadView() {
         view = UIView()
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = .systemGroupedBackground
 
         tableView.dataSource = self
         tableView.delegate = self
@@ -77,7 +77,7 @@ class TunnelsListTableViewController: UIViewController {
 
         centeredAddButton.onTapped = { [weak self] in
             guard let self = self else { return }
-            self.addButtonTapped(sender: self.centeredAddButton)
+            self.addButtonTapped()
         }
 
         busyIndicator.startAnimating()
@@ -93,8 +93,8 @@ class TunnelsListTableViewController: UIViewController {
     func handleTableStateChange() {
         switch tableState {
         case .normal:
-            navigationItem.rightBarButtonItem = UIBarButtonItem(barButtonSystemItem: .add, target: self, action: #selector(addButtonTapped(sender:)))
-            navigationItem.leftBarButtonItem = UIBarButtonItem(title: tr("tunnelsListSettingsButtonTitle"), style: .plain, target: self, action: #selector(settingsButtonTapped(sender:)))
+            navigationItem.rightBarButtonItem = UIBarButtonItem(barButtonSystemItem: .add, target: self, action: #selector(addButtonTapped))
+            navigationItem.leftBarButtonItem = UIBarButtonItem(title: tr("tunnelsListSettingsButtonTitle"), style: .plain, target: self, action: #selector(settingsButtonTapped))
         case .rowSwiped:
             navigationItem.rightBarButtonItem = UIBarButtonItem(barButtonSystemItem: .done, target: self, action: #selector(doneButtonTapped))
             navigationItem.leftBarButtonItem = UIBarButtonItem(title: tr("tunnelsListSelectButtonTitle"), style: .plain, target: self, action: #selector(selectButtonTapped))
@@ -110,7 +110,7 @@ class TunnelsListTableViewController: UIViewController {
         if case .multiSelect(let selectionCount) = tableState, selectionCount > 0 {
             navigationItem.title = tr(format: "tunnelsListSelectedTitle (%d)", selectionCount)
         } else {
-            navigationItem.title = tr("tunnelsListTitle")
+            navigationItem.title = tr("iosAppDisplayName")
         }
         if case .multiSelect = tableState {
             tableView.allowsMultipleSelectionDuringEditing = true
@@ -134,46 +134,47 @@ class TunnelsListTableViewController: UIViewController {
         }
     }
 
-    @objc func addButtonTapped(sender: AnyObject) {
-        guard tunnelsManager != nil else { return }
+    @objc func addButtonTapped() {
+        guard let tunnelsManager = tunnelsManager else { return }
 
-        let alert = UIAlertController(title: "", message: tr("addTunnelMenuHeader"), preferredStyle: .actionSheet)
-        let importFileAction = UIAlertAction(title: tr("addTunnelMenuImportFile"), style: .default) { [weak self] _ in
-            self?.presentViewControllerForFileImport()
-        }
-        alert.addAction(importFileAction)
-
-        let scanQRCodeAction = UIAlertAction(title: tr("addTunnelMenuQRCode"), style: .default) { [weak self] _ in
-            self?.presentViewControllerForScanningQRCode()
-        }
-        alert.addAction(scanQRCodeAction)
-
-        let createFromScratchAction = UIAlertAction(title: tr("addTunnelMenuFromScratch"), style: .default) { [weak self] _ in
-            if let self = self, let tunnelsManager = self.tunnelsManager {
-                self.presentViewControllerForTunnelCreation(tunnelsManager: tunnelsManager)
+        let menu = AddTunnelMenu(
+            create: { [weak self] in
+                self?.dismiss(animated: true) { [weak self] in
+                    self?.presentViewControllerForTunnelCreation(tunnelsManager: tunnelsManager)
+                }
+            },
+            importFile: { [weak self] in
+                self?.dismiss(animated: true) { [weak self] in
+                    self?.presentViewControllerForFileImport()
+                }
+            },
+            scanQRCode: { [weak self] in
+                self?.dismiss(animated: true) { [weak self] in
+                    self?.presentViewControllerForScanningQRCode()
+                }
             }
+        )
+        let sheet = UIHostingController(rootView: menu)
+        sheet.modalPresentationStyle = .pageSheet
+        if #available(iOS 16.0, *) {
+            let compact = UISheetPresentationController.Detent.custom { context in
+                let rowHeight = UIFontMetrics(forTextStyle: .body).scaledValue(for: 48)
+                return min(context.maximumDetentValue, rowHeight * 4 + 34)
+            }
+            sheet.sheetPresentationController?.detents = [compact, .large()]
+        } else {
+            sheet.sheetPresentationController?.detents = [.medium(), .large()]
         }
-        alert.addAction(createFromScratchAction)
-
-        let cancelAction = UIAlertAction(title: tr("actionCancel"), style: .cancel)
-        alert.addAction(cancelAction)
-
-        if let sender = sender as? UIBarButtonItem {
-            alert.popoverPresentationController?.barButtonItem = sender
-        } else if let sender = sender as? UIView {
-            alert.popoverPresentationController?.sourceView = sender
-            alert.popoverPresentationController?.sourceRect = sender.bounds
-        }
-        present(alert, animated: true, completion: nil)
+        sheet.sheetPresentationController?.prefersGrabberVisible = true
+        sheet.sheetPresentationController?.prefersEdgeAttachedInCompactHeight = true
+        present(sheet, animated: true)
     }
 
-    @objc func settingsButtonTapped(sender: UIBarButtonItem) {
+    @objc func settingsButtonTapped() {
         guard tunnelsManager != nil else { return }
 
         let settingsVC = SettingsTableViewController(tunnelsManager: tunnelsManager)
-        let settingsNC = UINavigationController(rootViewController: settingsVC)
-        settingsNC.modalPresentationStyle = .formSheet
-        present(settingsNC, animated: true)
+        navigationController?.pushViewController(settingsVC, animated: true)
     }
 
     func presentViewControllerForTunnelCreation(tunnelsManager: TunnelsManager) {
@@ -310,8 +311,12 @@ extension TunnelsListTableViewController: UITableViewDataSource {
             cell.onSwitchToggled = { [weak self] isOn in
                 guard let self = self, let tunnelsManager = self.tunnelsManager else { return }
                 if tunnel.hasOnDemandRules {
-                    tunnelsManager.setOnDemandEnabled(isOn, on: tunnel) { error in
-                        if error == nil && !isOn {
+                    tunnel.connectionError = nil
+                    tunnelsManager.setOnDemandEnabled(isOn, on: tunnel) { [weak self] error in
+                        if let error = error {
+                            tunnel.connectionError = error.alertText.message
+                            ErrorPresenter.showErrorAlert(error: error, from: self)
+                        } else if !isOn {
                             tunnelsManager.startDeactivation(of: tunnel)
                         }
                     }
@@ -419,5 +424,44 @@ extension UISplitViewController {
                 showDetailViewController(viewController, sender: sender)
             }
         }
+    }
+}
+
+private struct AddTunnelMenu: View {
+    @Environment(\.dismiss) private var dismiss
+    let create: () -> Void
+    let importFile: () -> Void
+    let scanQRCode: () -> Void
+
+    @ScaledMetric(relativeTo: .body) private var rowHeight = 48.0
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                menuRow("iosAddTunnelCreate", action: create)
+                Divider()
+                menuRow("addTunnelMenuImportFile", action: importFile)
+                Divider()
+                menuRow("addTunnelMenuQRCode", action: scanQRCode)
+                Divider()
+                menuRow("iosAddTunnelClose") { dismiss() }
+            }
+            .background(Color(uiColor: .secondarySystemGroupedBackground))
+            .cornerRadius(12)
+            .padding(.horizontal, 16)
+            .padding(.top, 20)
+            .padding(.bottom, 10)
+        }
+        .background(Color(uiColor: .systemGroupedBackground))
+    }
+
+    private func menuRow(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(tr(title))
+                .frame(maxWidth: .infinity, minHeight: rowHeight, alignment: .leading)
+                .padding(.horizontal, 16)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }

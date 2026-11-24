@@ -60,6 +60,23 @@ void write_msg_to_log(struct log *log, const char *tag, const char *msg)
 	msync(line, sizeof(*line), MS_ASYNC);
 }
 
+void clear_log(struct log *log)
+{
+	// Both processes keep the same mapping. Clear the entries without resetting
+	// the writer's index or overwriting a timestamp published by a racing writer.
+	struct timespec now;
+	clock_gettime(CLOCK_REALTIME, &now);
+	uint_fast64_t cutoff = now.tv_sec * 1000000000ULL + now.tv_nsec;
+
+	for (size_t i = 0; i < MAX_LINES; ++i) {
+		atomic_uint_fast64_t *timestamp = &log->lines[i].time_ns;
+		uint_fast64_t previous = atomic_load(timestamp);
+		if (previous && previous <= cutoff)
+			atomic_compare_exchange_strong(timestamp, &previous, 0);
+	}
+	msync(log, sizeof(*log), MS_ASYNC);
+}
+
 int write_log_to_file(const char *file_name, const struct log *input_log)
 {
 	struct log *log;

@@ -16,6 +16,9 @@ class TunnelListCell: UITableViewCell {
             statusObservationToken = tunnel?.observe(\.status) { [weak self] tunnel, _ in
                 self?.update(from: tunnel, animated: true)
             }
+            errorObservationToken = tunnel?.observe(\.connectionError) { [weak self] tunnel, _ in
+                self?.update(from: tunnel, animated: true)
+            }
             // Bind to tunnel's on-demand settings
             isOnDemandEnabledObservationToken = tunnel?.observe(\.isActivateOnDemandEnabled) { [weak self] tunnel, _ in
                 self?.update(from: tunnel, animated: true)
@@ -45,29 +48,31 @@ class TunnelListCell: UITableViewCell {
         return label
     }()
 
-    let busyIndicator: UIActivityIndicatorView = {
-        let busyIndicator: UIActivityIndicatorView
-        busyIndicator = UIActivityIndicatorView(style: .medium)
-        busyIndicator.hidesWhenStopped = true
-        return busyIndicator
+    private let statusDot: UIView = {
+        let dot = UIView()
+        dot.layer.cornerRadius = 7
+        dot.isAccessibilityElement = false
+        return dot
     }()
+
+    private lazy var nameLeadingConstraint = nameLabel.leadingAnchor.constraint(
+        equalTo: contentView.layoutMarginsGuide.leadingAnchor
+    )
 
     let statusSwitch = UISwitch()
 
     private var nameObservationToken: NSKeyValueObservation?
     private var statusObservationToken: NSKeyValueObservation?
+    private var errorObservationToken: NSKeyValueObservation?
     private var isOnDemandEnabledObservationToken: NSKeyValueObservation?
     private var hasOnDemandRulesObservationToken: NSKeyValueObservation?
-
-    private var subTitleLabelBottomConstraint: NSLayoutConstraint?
-    private var nameLabelBottomConstraint: NSLayoutConstraint?
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
 
         accessoryType = .disclosureIndicator
 
-        for subview in [statusSwitch, busyIndicator, onDemandLabel, nameLabel] {
+        for subview in [statusSwitch, statusDot, onDemandLabel, nameLabel] {
             subview.translatesAutoresizingMaskIntoConstraints = false
             contentView.addSubview(subview)
         }
@@ -79,22 +84,24 @@ class TunnelListCell: UITableViewCell {
             contentView.layoutMarginsGuide.bottomAnchor.constraint(equalToSystemSpacingBelow: nameLabel.bottomAnchor, multiplier: 1)
         nameLabelBottomConstraint.priority = .defaultLow
 
+        statusDot.isHidden = true
         NSLayoutConstraint.activate([
             statusSwitch.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
             statusSwitch.trailingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.trailingAnchor),
-            statusSwitch.leadingAnchor.constraint(equalToSystemSpacingAfter: busyIndicator.trailingAnchor, multiplier: 1),
             statusSwitch.leadingAnchor.constraint(equalToSystemSpacingAfter: onDemandLabel.trailingAnchor, multiplier: 1),
 
+            statusDot.leadingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.leadingAnchor),
+            statusDot.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+            statusDot.widthAnchor.constraint(equalToConstant: 14),
+            statusDot.heightAnchor.constraint(equalToConstant: 14),
+
             nameLabel.topAnchor.constraint(equalToSystemSpacingBelow: contentView.layoutMarginsGuide.topAnchor, multiplier: 1),
-            nameLabel.leadingAnchor.constraint(equalToSystemSpacingAfter: contentView.layoutMarginsGuide.leadingAnchor, multiplier: 1),
+            nameLeadingConstraint,
             nameLabel.trailingAnchor.constraint(lessThanOrEqualTo: statusSwitch.leadingAnchor),
             nameLabelBottomConstraint,
 
             onDemandLabel.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
-            onDemandLabel.leadingAnchor.constraint(equalToSystemSpacingAfter: nameLabel.trailingAnchor, multiplier: 1),
-
-            busyIndicator.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
-            busyIndicator.leadingAnchor.constraint(greaterThanOrEqualToSystemSpacingAfter: nameLabel.trailingAnchor, multiplier: 1)
+            onDemandLabel.leadingAnchor.constraint(equalToSystemSpacingAfter: nameLabel.trailingAnchor, multiplier: 1)
         ])
 
         statusSwitch.addTarget(self, action: #selector(switchToggled), for: .valueChanged)
@@ -106,7 +113,8 @@ class TunnelListCell: UITableViewCell {
 
     override func prepareForReuse() {
         super.prepareForReuse()
-        reset(animated: false)
+        tunnel = nil
+        onSwitchToggled = nil
     }
 
     override func setEditing(_ editing: Bool, animated: Bool) {
@@ -125,9 +133,10 @@ class TunnelListCell: UITableViewCell {
         }
         let status = tunnel.status
         let isOnDemandEngaged = tunnel.isActivateOnDemandEnabled
+        updateStatusDot(for: tunnel)
 
         let shouldSwitchBeOn = ((status != .deactivating && status != .inactive) || isOnDemandEngaged)
-        statusSwitch.setOn(shouldSwitchBeOn, animated: true)
+        statusSwitch.setOn(shouldSwitchBeOn, animated: animated)
 
         if isOnDemandEngaged && !(status == .activating || status == .active) {
             statusSwitch.onTintColor = UIColor.systemYellow
@@ -135,28 +144,49 @@ class TunnelListCell: UITableViewCell {
             statusSwitch.onTintColor = UIColor.systemGreen
         }
 
-        statusSwitch.isUserInteractionEnabled = (status == .inactive || status == .active)
+        statusSwitch.isUserInteractionEnabled = tunnel.hasOnDemandRules || status == .inactive || status == .active
+        onDemandLabel.text = tunnel.hasOnDemandRules && isOnDemandEngaged ? tr("tunnelListCaptionOnDemand") : ""
+    }
 
-        if tunnel.hasOnDemandRules {
-            onDemandLabel.text = isOnDemandEngaged ? tr("tunnelListCaptionOnDemand") : ""
-            busyIndicator.stopAnimating()
-            statusSwitch.isUserInteractionEnabled = true
-        } else {
-            onDemandLabel.text = ""
-            if status == .inactive || status == .active {
-                busyIndicator.stopAnimating()
+    private func updateStatusDot(for tunnel: TunnelContainer) {
+        let presentation: (color: UIColor?, accessibilityText: String)
+        switch tunnel.status {
+        case .active:
+            presentation = (.systemGreen, tr("tunnelStatusActive"))
+        case .inactive:
+            if let error = tunnel.connectionError {
+                presentation = (.systemRed, tr(format: "tunnelListStatusFailed (%@)", error))
+            } else if tunnel.isActivateOnDemandEnabled {
+                presentation = (.systemOrange, tr("tunnelListStatusOnDemandWaiting"))
             } else {
-                busyIndicator.startAnimating()
+                presentation = (nil, tr("tunnelStatusInactive"))
             }
-            statusSwitch.isUserInteractionEnabled = (status == .inactive || status == .active)
+        case .activating, .deactivating, .reasserting, .restarting, .waiting:
+            let statusKey: String
+            switch tunnel.status {
+            case .activating: statusKey = "tunnelStatusActivating"
+            case .deactivating: statusKey = "tunnelStatusDeactivating"
+            case .reasserting: statusKey = "tunnelStatusReasserting"
+            case .restarting: statusKey = "tunnelStatusRestarting"
+            case .waiting: statusKey = "tunnelStatusWaiting"
+            case .active, .inactive: return
+            }
+            presentation = (.systemOrange, tr(statusKey))
         }
-
+        statusDot.backgroundColor = presentation.color
+        statusDot.isHidden = presentation.color == nil
+        nameLeadingConstraint.constant = statusDot.isHidden ? 0 : 22
+        nameLabel.accessibilityValue = presentation.accessibilityText
     }
 
     private func reset(animated: Bool) {
         statusSwitch.thumbTintColor = nil
         statusSwitch.setOn(false, animated: animated)
         statusSwitch.isUserInteractionEnabled = false
-        busyIndicator.stopAnimating()
+        statusDot.backgroundColor = nil
+        statusDot.isHidden = true
+        nameLeadingConstraint.constant = 0
+        nameLabel.accessibilityValue = nil
+        onDemandLabel.text = ""
     }
 }

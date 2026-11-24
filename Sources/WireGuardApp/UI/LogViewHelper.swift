@@ -35,6 +35,12 @@ public class LogViewHelper {
         close_log(self.log)
     }
 
+    // Call between fetches so the next snapshot starts with a fresh cursor.
+    func clearLog() {
+        clear_log(log)
+        cursor = UINT32_MAX
+    }
+
     func fetchLogEntriesSinceLastFetch(completion: @escaping ([LogViewHelper.LogEntry]) -> Void) {
         var logEntries = LogEntries()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
